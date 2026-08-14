@@ -368,8 +368,8 @@ class ModelRunner:
         message: ChatCompletionMessage,
         output: ModelOutputAccumulator,
     ) -> Iterable[StreamEvent]:
-        if message.reasoning:
-            yield StreamEvent("reasoning", {"delta": self.reasoning_text(message.reasoning)})
+        if reasoning := self.message_reasoning_text(message):
+            yield StreamEvent("reasoning", {"delta": reasoning})
         if message.content:
             output.add_text(message.content)
             yield StreamEvent("text", {"delta": message.content})
@@ -385,13 +385,20 @@ class ModelRunner:
             state.usage = usage
         for choice in chunk.choices:
             delta = choice.delta
-            if delta.reasoning:
-                yield StreamEvent("reasoning", {"delta": self.reasoning_text(delta.reasoning)})
+            if reasoning := self.message_reasoning_text(delta):
+                yield StreamEvent("reasoning", {"delta": reasoning})
             if delta.content:
                 output.add_text(delta.content)
                 yield StreamEvent("text", {"delta": delta.content})
             if delta.tool_calls:
                 output.merge_delta_tool_calls(delta.tool_calls)
+
+    @classmethod
+    def message_reasoning_text(cls, message: object) -> str:
+        for field in ("reasoning", "reason_summary"):
+            if text := cls.reasoning_text(getattr(message, field, None)):
+                return text
+        return ""
 
     @staticmethod
     def reasoning_text(reasoning: object) -> str:

@@ -8,11 +8,17 @@ import pytest
 from any_llm.constants import LLMProvider
 from any_llm.providers.anthropic.base import BaseAnthropicProvider
 from any_llm.providers.openai.base import BaseOpenAIProvider
-from any_llm.types.completion import ChatCompletionChunk, ChatCompletionMessageFunctionToolCall, Function
+from any_llm.types.completion import (
+    ChatCompletionChunk,
+    ChatCompletionMessage,
+    ChatCompletionMessageFunctionToolCall,
+    Function,
+)
 
-from bub.builtin.model_runner import ModelRunner, tool_invocation_from_native
+from bub.builtin.model_runner import ModelOutputAccumulator, ModelRunner, tool_invocation_from_native
 from bub.builtin.settings import AgentSettings, ModelCandidate
 from bub.builtin.tape import Tape
+from bub.streaming import StreamState
 from bub.tape import AsyncTapeStoreAdapter, InMemoryTapeStore, TapeContext
 from bub.tools import ToolExecutor
 
@@ -211,3 +217,46 @@ async def test_completion_args_are_forwarded_without_overriding_managed_args() -
     assert llm.completion_kwargs["max_tokens"] == 42
     assert llm.completion_kwargs["stream"] is True
     assert llm.completion_kwargs["stream_options"] == {"include_usage": True}
+
+
+def test_non_streaming_reason_summary_is_emitted_as_reasoning() -> None:
+    runner = ModelRunner(AgentSettings.model_construct())
+    message = ChatCompletionMessage.model_validate({
+        "role": "assistant",
+        "content": "done",
+        "reason_summary": "brief thought",
+    })
+
+    events = list(runner._completion_message_events(message, ModelOutputAccumulator()))
+
+    assert [(event.kind, event.data) for event in events] == [
+        ("reasoning", {"delta": "brief thought"}),
+        ("text", {"delta": "done"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_reason_summary_is_emitted_as_reasoning() -> None:
+    runner = ModelRunner(AgentSettings.model_construct())
+    chunk = ChatCompletionChunk.model_validate({
+        "id": "chatcmpl_test",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "gpt-5.6-luna",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": None,
+                "delta": {"role": "assistant", "reason_summary": "brief thought"},
+            }
+        ],
+    })
+
+    events = [
+        event
+        async for event in runner._completion_chunk_events(chunk, StreamState(), ModelOutputAccumulator())
+    ]
+
+    assert [(event.kind, event.data) for event in events] == [
+        ("reasoning", {"delta": "brief thought"}),
+    ]
