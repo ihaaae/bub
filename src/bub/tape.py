@@ -2,18 +2,79 @@
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
+import hashlib
 import inspect
 import json
-from collections.abc import Callable, Coroutine, Iterable, Sequence
-from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, time
-from datetime import date as date_type
-from typing import Any, NoReturn, Protocol, Self, overload
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Mapping
+from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from typing_extensions import TypeIs
+from pydantic import BaseModel
 
-from bub.errors import BubError, ErrorKind
+from bub.errors import BubError
+
+__all__ = [
+    "LAST_ANCHOR",
+    "AnchorSelector",
+    "AnchorSummary",
+    "AsyncTapeStore",
+    "AsyncTapeStoreAdapter",
+    "ContextSelector",
+    "InMemoryQueryMixin",
+    "InMemoryTapeStore",
+    "SelectedMessages",
+    "Tape",
+    "TapeContext",
+    "TapeEntry",
+    "TapeCost",
+    "TapeInfo",
+    "TapeQuery",
+    "TapeStore",
+    "UnavailableTapeStore",
+    "build_messages",
+    "is_async_tape_store",
+    "utc_now",
+]
+
+if TYPE_CHECKING:
+    from bub.store import (
+        AsyncTapeStore,
+        AsyncTapeStoreAdapter,
+        InMemoryQueryMixin,
+        InMemoryTapeStore,
+        TapeQuery,
+        TapeStore,
+        UnavailableTapeStore,
+        is_async_tape_store,
+    )
+
+
+_STORE_EXPORTS = frozenset({
+    "AsyncTapeStore",
+    "AsyncTapeStoreAdapter",
+    "InMemoryQueryMixin",
+    "InMemoryTapeStore",
+    "TapeQuery",
+    "TapeStore",
+    "UnavailableTapeStore",
+    "is_async_tape_store",
+})
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _STORE_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from bub import store
+
+    return getattr(store, name)
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_STORE_EXPORTS})
 
 
 def utc_now() -> str:
@@ -68,81 +129,6 @@ class TapeEntry:
         return cls(id=0, kind="event", payload=payload, meta=dict(meta))
 
 
-class TapeStore(Protocol):
-    """Append-only tape storage interface."""
-
-    def list_tapes(self) -> list[str]: ...
-
-    def reset(self, tape: str) -> None: ...
-
-    def fetch_all(self, query: TapeQuery) -> Iterable[TapeEntry]: ...
-
-    def append(self, tape: str, entry: TapeEntry) -> None: ...
-
-
-class AsyncTapeStore(Protocol):
-    """Async append-only tape storage interface."""
-
-    async def list_tapes(self) -> list[str]: ...
-
-    async def reset(self, tape: str) -> None: ...
-
-    async def fetch_all(self, query: TapeQuery) -> Iterable[TapeEntry]: ...
-
-    async def append(self, tape: str, entry: TapeEntry) -> None: ...
-
-
-def is_async_tape_store(store: TapeStore | AsyncTapeStore) -> TypeIs[AsyncTapeStore]:
-    return hasattr(store, "append") and inspect.iscoroutinefunction(store.append)
-
-
-@dataclass(frozen=True)
-class TapeQuery[T: TapeStore | AsyncTapeStore]:
-    tape: str
-    store: T
-    _query: str | None = None
-    _after_anchor: str | None = None
-    _after_last: bool = False
-    _between_anchors: tuple[str, str] | None = None
-    _between_dates: tuple[str, str] | None = None
-    _kinds: tuple[str, ...] = field(default_factory=tuple)
-    _limit: int | None = None
-
-    def query(self, value: str) -> Self:
-        return replace(self, _query=value)
-
-    def after_anchor(self, name: str) -> Self:
-        if not name:
-            return replace(self, _after_anchor=None, _after_last=False)
-        return replace(self, _after_anchor=name, _after_last=False)
-
-    def last_anchor(self) -> Self:
-        return replace(self, _after_anchor=None, _after_last=True)
-
-    def between_anchors(self, start: str, end: str) -> Self:
-        return replace(self, _between_anchors=(start, end))
-
-    def between_dates(self, start: str | date_type, end: str | date_type) -> Self:
-        start_value = start.isoformat() if isinstance(start, date_type) else start
-        end_value = end.isoformat() if isinstance(end, date_type) else end
-        return replace(self, _between_dates=(start_value, end_value))
-
-    def kinds(self, *kinds: str) -> Self:
-        return replace(self, _kinds=kinds)
-
-    def limit(self, value: int) -> Self:
-        return replace(self, _limit=value)
-
-    @overload
-    def all(self: TapeQuery[TapeStore]) -> Iterable[TapeEntry]: ...
-
-    @overload
-    async def all(self: TapeQuery[AsyncTapeStore]) -> Iterable[TapeEntry]: ...
-
-    def all(self) -> Iterable[TapeEntry] | Coroutine[None, None, Iterable[TapeEntry]]:
-        return self.store.fetch_all(self)
-
-
 class _LastAnchor:
     def __repr__(self) -> str:
         return "LAST_ANCHOR"
@@ -187,180 +173,344 @@ def _default_messages(entries: Iterable[TapeEntry]) -> list[dict[str, Any]]:
     return messages
 
 
-def _anchor_index(
-    entries: Sequence[TapeEntry],
-    name: str | None,
-    *,
-    default: int,
-    forward: bool,
-    start: int = 0,
-) -> int:
-    rng = range(start, len(entries)) if forward else range(len(entries) - 1, start - 1, -1)
-    for idx in rng:
-        entry = entries[idx]
-        if entry.kind != "anchor":
-            continue
-        if name is not None and entry.payload.get("name") != name:
-            continue
-        return idx
-    return default
+@dataclass(frozen=True)
+class TapeInfo:
+    """Runtime tape info summary."""
+
+    name: str
+    entries: int
+    anchors: int
+    last_anchor: str | None
+    entries_since_last_anchor: int
+    last_token_usage: int | None
+    last_token_cache_hit_rate: float | None
 
 
-def _parse_datetime_boundary(value: str, *, is_end: bool) -> datetime:
-    if "T" not in value and " " not in value:
-        try:
-            parsed_date = date_type.fromisoformat(value)
-        except ValueError:
-            pass
-        else:
-            boundary_time = time.max if is_end else time.min
-            return datetime.combine(parsed_date, boundary_time, tzinfo=UTC)
+def _usage_int(usage: Mapping[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return max(0, value)
+    return None
+
+
+def _detail_cached_input_tokens(usage: Mapping[str, Any]) -> int | None:
+    for details_key in ("prompt_tokens_details", "input_tokens_details"):
+        details = usage.get(details_key)
+        if isinstance(details, Mapping):
+            cached = _usage_int(details, "cached_tokens", "cache_read_input_tokens")
+            if cached is not None:
+                return cached
+    return _usage_int(usage, "cached_tokens")
+
+
+def _input_token_breakdown(usage: Mapping[str, Any]) -> tuple[int, int] | None:
+    """Return cached and uncached input tokens across common provider shapes."""
+    prompt_tokens = _usage_int(usage, "prompt_tokens")
+    input_tokens = _usage_int(usage, "input_tokens")
+    cache_read_tokens = _usage_int(usage, "cache_read_input_tokens")
+    cache_creation_tokens = _usage_int(usage, "cache_creation_input_tokens") or 0
+
+    if prompt_tokens is not None:
+        cached_tokens = _detail_cached_input_tokens(usage) or cache_read_tokens or 0
+        cached_tokens = min(cached_tokens, prompt_tokens)
+        return cached_tokens, prompt_tokens - cached_tokens
+
+    if input_tokens is None:
+        return None
+
+    # Anthropic reports input_tokens excluding cache reads and exposes those
+    # reads as a top-level cache_read_input_tokens field. Other providers use
+    # input_tokens as the total and put the cached subset in input details.
+    cached_detail = _detail_cached_input_tokens(usage)
+    if cached_detail is None and cache_read_tokens is not None:
+        return cache_read_tokens, input_tokens + cache_creation_tokens
+    cached_tokens = min(cached_detail or 0, input_tokens)
+    return cached_tokens, input_tokens - cached_tokens + cache_creation_tokens
+
+
+def _usage_cost(value: object) -> float | None:
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return None
     try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        try:
-            parsed_date = date_type.fromisoformat(value)
-        except ValueError as exc:
-            raise BubError(ErrorKind.INVALID_INPUT, f"Invalid ISO date or datetime: '{value}'.") from exc
-        boundary_time = time.max if is_end else time.min
-        parsed = datetime.combine(parsed_date, boundary_time, tzinfo=UTC)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        cost = float(value)
+    except (TypeError, ValueError):
+        return None
+    return cost if cost == cost and abs(cost) != float("inf") else None
 
 
-def _entry_in_datetime_range(entry: TapeEntry, start_dt: datetime, end_dt: datetime) -> bool:
-    entry_dt = _parse_datetime_boundary(entry.date, is_end=False)
-    return start_dt <= entry_dt <= end_dt
+@dataclass(frozen=True)
+class TapeCost:
+    """Aggregate token usage and provider-reported cost for a tape."""
+
+    name: str
+    cached_input_tokens: int
+    uncached_input_tokens: int
+    output_tokens: int
+    cost: float | None
 
 
-def _entry_matches_query(entry: TapeEntry, query: str) -> bool:
-    needle = query.casefold()
-    haystack = json.dumps(
-        {
-            "kind": entry.kind,
-            "date": entry.date,
-            "payload": entry.payload,
-            "meta": entry.meta,
-        },
-        sort_keys=True,
-        default=str,
-    ).casefold()
-    return needle in haystack
+@dataclass(frozen=True)
+class AnchorSummary:
+    """Rendered anchor summary."""
+
+    name: str
+    state: dict[str, object]
 
 
-class InMemoryQueryMixin:
-    """Mixin to implement in-memory query support for simple stores."""
+@dataclass(frozen=True)
+class Tape:
+    """Tape abstraction for recording agent interactions."""
 
-    def read(self, tape: str) -> list[TapeEntry] | None:
-        raise NotImplementedError("InMemoryQueryMixin requires a read() method to be implemented.")
+    archive_path: Path
+    store: AsyncTapeStore
+    context: TapeContext
+    _name: str | None = field(default=None, repr=False)
 
-    def fetch_all(self, query: TapeQuery) -> Iterable[TapeEntry]:  # noqa: C901
-        entries = self.read(query.tape) or []
-        start_index = 0
-        end_index: int | None = None
+    @property
+    def name(self) -> str:
+        if self._name is None:
+            raise ValueError("tape is not scoped")
+        return self._name
 
-        if query._between_anchors is not None:
-            start_name, end_name = query._between_anchors
-            start_idx = _anchor_index(entries, start_name, default=-1, forward=False)
-            if start_idx < 0:
-                raise BubError(ErrorKind.NOT_FOUND, f"Anchor '{start_name}' was not found.")
-            end_idx = _anchor_index(entries, end_name, default=-1, forward=True, start=start_idx + 1)
-            if end_idx < 0:
-                raise BubError(ErrorKind.NOT_FOUND, f"Anchor '{end_name}' was not found.")
-            start_index = min(start_idx + 1, len(entries))
-            end_index = min(max(start_index, end_idx), len(entries))
-        elif query._after_last:
-            anchor_index = _anchor_index(entries, None, default=-1, forward=False)
-            if anchor_index < 0:
-                raise BubError(ErrorKind.NOT_FOUND, "No anchors found in tape.")
-            start_index = min(anchor_index + 1, len(entries))
-        elif query._after_anchor is not None:
-            anchor_index = _anchor_index(entries, query._after_anchor, default=-1, forward=False)
-            if anchor_index < 0:
-                raise BubError(ErrorKind.NOT_FOUND, f"Anchor '{query._after_anchor}' was not found.")
-            start_index = min(anchor_index + 1, len(entries))
+    def with_context(self, context: TapeContext) -> Tape:
+        return replace(self, context=context)
 
-        sliced = entries[start_index:end_index]
-        if query._between_dates is not None:
-            start_date, end_date = query._between_dates
-            start_dt = _parse_datetime_boundary(start_date, is_end=False)
-            end_dt = _parse_datetime_boundary(end_date, is_end=True)
-            if start_dt > end_dt:
-                raise BubError(ErrorKind.INVALID_INPUT, "Start date must be earlier than or equal to end date.")
-            sliced = [entry for entry in sliced if _entry_in_datetime_range(entry, start_dt, end_dt)]
-        if query._query:
-            sliced = [entry for entry in sliced if _entry_matches_query(entry, query._query)]
-        if query._kinds:
-            sliced = [entry for entry in sliced if entry.kind in query._kinds]
-        if query._limit is not None:
-            sliced = sliced[: query._limit]
-        return sliced
+    def scoped(self, name: str, context: TapeContext | None = None) -> Tape:
+        return replace(self, context=context or self.context, _name=name)
 
+    def query(self) -> TapeQuery[AsyncTapeStore]:
+        from bub.store import TapeQuery
 
-class InMemoryTapeStore(InMemoryQueryMixin):
-    """In-memory tape storage."""
+        return TapeQuery(tape=self.name, store=self.store)
 
-    def __init__(self) -> None:
-        self._tapes: dict[str, list[TapeEntry]] = {}
-        self._next_id: dict[str, int] = {}
+    async def info(self) -> TapeInfo:
+        entries = list(await self.store.fetch_all(self.query()))
+        anchors = [(i, entry) for i, entry in enumerate(entries) if entry.kind == "anchor"]
+        if anchors:
+            last_anchor = anchors[-1][1].payload.get("name")
+            entries_since_last_anchor = len(entries) - anchors[-1][0] - 1
+        else:
+            last_anchor = None
+            entries_since_last_anchor = len(entries)
+        last_token_usage: int | None = None
+        last_token_cache_hit_rate: float | None = None
+        for entry in reversed(entries):
+            if entry.kind == "event" and entry.payload.get("name") == "run":
+                data = entry.payload.get("data")
+                usage = data.get("usage") if isinstance(data, Mapping) else None
+                if not isinstance(usage, Mapping):
+                    continue
+                token_usage = usage.get("total_tokens")
+                if not isinstance(token_usage, int) or isinstance(token_usage, bool):
+                    continue
+                last_token_usage = token_usage
+                prompt_tokens = usage.get("prompt_tokens")
+                prompt_details = usage.get("prompt_tokens_details")
+                cached_tokens = prompt_details.get("cached_tokens") if isinstance(prompt_details, Mapping) else None
+                if (
+                    isinstance(prompt_tokens, int)
+                    and not isinstance(prompt_tokens, bool)
+                    and prompt_tokens > 0
+                    and isinstance(cached_tokens, int)
+                    and not isinstance(cached_tokens, bool)
+                ):
+                    last_token_cache_hit_rate = cached_tokens / prompt_tokens
+                break
+        return TapeInfo(
+            name=self.name,
+            entries=len(entries),
+            anchors=len(anchors),
+            last_anchor=str(last_anchor) if last_anchor else None,
+            entries_since_last_anchor=entries_since_last_anchor,
+            last_token_usage=last_token_usage,
+            last_token_cache_hit_rate=last_token_cache_hit_rate,
+        )
 
-    def list_tapes(self) -> list[str]:
-        return sorted(self._tapes.keys())
+    async def cost(self) -> TapeCost:
+        """Aggregate token usage and provider-reported costs for this tape.
 
-    def reset(self, tape: str) -> None:
-        self._tapes.pop(tape, None)
-        self._next_id.pop(tape, None)
+        Providers do not expose a common pricing catalogue. When a provider
+        reports a ``cost`` field in its usage payload (OpenRouter does this,
+        for example), it is summed here. A missing cost remains unknown rather
+        than being presented as a misleading zero.
+        """
+        cached_input_tokens = 0
+        uncached_input_tokens = 0
+        output_tokens = 0
+        total_cost = 0.0
+        has_cost = False
 
-    def read(self, tape: str) -> list[TapeEntry] | None:
-        entries = self._tapes.get(tape)
-        if entries is None:
+        entries = await self.store.fetch_all(self.query().kinds("event"))
+        for entry in entries:
+            if entry.payload.get("name") != "run":
+                continue
+            data = entry.payload.get("data")
+            if not isinstance(data, Mapping):
+                continue
+            usage = data.get("usage")
+            if not isinstance(usage, Mapping):
+                continue
+
+            input_breakdown = _input_token_breakdown(usage)
+            if input_breakdown is not None:
+                cached, uncached = input_breakdown
+                cached_input_tokens += cached
+                uncached_input_tokens += uncached
+
+            output = _usage_int(usage, "completion_tokens", "output_tokens")
+            if output is not None:
+                output_tokens += output
+
+            cost = _usage_cost(usage.get("cost"))
+            if cost is not None:
+                total_cost += cost
+                has_cost = True
+
+        return TapeCost(
+            name=self.name,
+            cached_input_tokens=cached_input_tokens,
+            uncached_input_tokens=uncached_input_tokens,
+            output_tokens=output_tokens,
+            cost=total_cost if has_cost else None,
+        )
+
+    async def ensure_bootstrap_anchor(self) -> None:
+        anchors = list(await self.store.fetch_all(self.query().kinds("anchor")))
+        if not anchors:
+            await self.handoff(name="session/start", state={"owner": "human"})
+
+    async def anchors(self, limit: int = 20) -> list[AnchorSummary]:
+        entries = list(await self.store.fetch_all(self.query().kinds("anchor")))
+        results: list[AnchorSummary] = []
+        for entry in entries[-limit:]:
+            name = str(entry.payload.get("name", "-"))
+            state = entry.payload.get("state")
+            state_dict: dict[str, object] = dict(state) if isinstance(state, dict) else {}
+            results.append(AnchorSummary(name=name, state=state_dict))
+        return results
+
+    async def search(self, query: TapeQuery[AsyncTapeStore]) -> list[TapeEntry]:
+        return list(await self.store.fetch_all(query))
+
+    async def append_event(self, name: str, payload: dict[str, Any], **meta: Any) -> None:
+        await self.store.append(self.name, TapeEntry.event(name, payload, **meta))
+
+    async def read_messages(self) -> list[dict[str, Any]]:
+        query = self.context.build_query(self.query())
+        entries = await self.store.fetch_all(query)
+        messages = build_messages(entries, self.context)
+        if inspect.isawaitable(messages):
+            messages = await messages
+        return messages
+
+    async def handoff(
+        self,
+        *,
+        name: str,
+        state: dict[str, Any] | None = None,
+        **meta: Any,
+    ) -> list[TapeEntry]:
+        tape_name = self.name
+        entry = TapeEntry.anchor(name, state=state, **meta)
+        event = TapeEntry.event("handoff", {"name": name, "state": state or {}}, **meta)
+        await self.store.append(tape_name, entry)
+        await self.store.append(tape_name, event)
+        return [entry, event]
+
+    async def record_chat(  # noqa: C901
+        self,
+        *,
+        run_id: str,
+        system_prompt: str | None,
+        new_messages: list[dict[str, Any]],
+        response_text: str | None,
+        context_error: BubError | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        tool_results: list[Any] | None = None,
+        error: BubError | None = None,
+        response: Any | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        tape_name = self.name
+        meta = {"run_id": run_id}
+        if system_prompt:
+            await self.store.append(tape_name, TapeEntry.system(system_prompt, **meta))
+        if context_error is not None:
+            await self.store.append(tape_name, TapeEntry.error(context_error, **meta))
+        for message in new_messages:
+            await self.store.append(tape_name, TapeEntry.message(message, **meta))
+        if tool_calls:
+            await self.store.append(tape_name, TapeEntry.tool_call(tool_calls, **meta))
+        if tool_results is not None:
+            await self.store.append(tape_name, TapeEntry.tool_result(tool_results, **meta))
+        if error is not None and error is not context_error:
+            await self.store.append(tape_name, TapeEntry.error(error, **meta))
+        if response_text is not None:
+            await self.store.append(
+                tape_name, TapeEntry.message({"role": "assistant", "content": response_text}, **meta)
+            )
+
+        data: dict[str, Any] = {"status": "error" if error is not None else "ok"}
+        resolved_usage = usage or self._extract_usage(response)
+        if resolved_usage is not None:
+            data["usage"] = resolved_usage
+        if provider:
+            data["provider"] = provider
+        if model:
+            data["model"] = model
+        await self.store.append(tape_name, TapeEntry.event("run", data, **meta))
+
+    @staticmethod
+    def _extract_usage(response: object) -> dict[str, Any] | None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
             return None
-        return [entry.copy() for entry in entries]
+        if isinstance(usage, dict):
+            return usage
+        if isinstance(usage, BaseModel):
+            payload = usage.model_dump(exclude_none=True)
+            return payload if isinstance(payload, dict) else None
+        return None
 
-    def append(self, tape: str, entry: TapeEntry) -> None:
-        next_id = self._next_id.get(tape, 1)
-        self._next_id[tape] = next_id + 1
-        stored = TapeEntry(next_id, entry.kind, dict(entry.payload), dict(entry.meta), entry.date)
-        self._tapes.setdefault(tape, []).append(stored)
+    async def _archive(self) -> Path:
+        tape_name = self.name
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        self.archive_path.mkdir(parents=True, exist_ok=True)
+        archive_path = self.archive_path / f"{tape_name}.jsonl.{stamp}.bak"
+        with archive_path.open("w", encoding="utf-8") as f:
+            for entry in await self.store.fetch_all(self.query()):
+                f.write(json.dumps(asdict(entry), ensure_ascii=False) + "\n")
+        return archive_path
 
+    async def reset(self, *, archive: bool = False) -> str:
+        archive_path: Path | None = None
+        if archive:
+            archive_path = await self._archive()
+        await self.store.reset(self.name)
+        state = {"owner": "human"}
+        if archive_path is not None:
+            state["archived"] = str(archive_path)
+        await self.handoff(name="session/start", state=state)
+        return f"Archived: {archive_path}" if archive_path else "ok"
 
-class AsyncTapeStoreAdapter:
-    """Adapt a sync TapeStore to AsyncTapeStore."""
+    def session_tape(self, session_id: str, workspace: Path, context: TapeContext | None = None) -> Tape:
+        workspace_hash = hashlib.md5(str(workspace.resolve()).encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+        tape_name = (
+            workspace_hash + "__" + hashlib.md5(session_id.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+        )
+        return self.scoped(tape_name, context=context)
 
-    def __init__(self, store: TapeStore) -> None:
-        self._store = store
+    @contextlib.asynccontextmanager
+    async def fork_tape(self, merge_back: bool = True) -> AsyncGenerator[Tape, None]:
+        from bub.store import ForkTapeStore
 
-    async def list_tapes(self) -> list[str]:
-        return await asyncio.to_thread(self._store.list_tapes)
-
-    async def reset(self, tape: str) -> None:
-        await asyncio.to_thread(self._store.reset, tape)
-
-    async def fetch_all(self, query: TapeQuery) -> Iterable[TapeEntry]:
-        return await asyncio.to_thread(self._store.fetch_all, query)
-
-    async def append(self, tape: str, entry: TapeEntry) -> None:
-        await asyncio.to_thread(self._store.append, tape, entry)
-
-
-class UnavailableTapeStore:
-    """Sync TapeStore sentinel that always fails with a clear message."""
-
-    def __init__(self, message: str) -> None:
-        self._message = message
-
-    def _raise(self) -> NoReturn:
-        raise BubError(ErrorKind.INVALID_INPUT, self._message)
-
-    def list_tapes(self) -> list[str]:
-        self._raise()
-
-    def reset(self, tape: str) -> None:
-        self._raise()
-
-    def fetch_all(self, query: TapeQuery) -> Iterable[TapeEntry]:
-        self._raise()
-
-    def append(self, tape: str, entry: TapeEntry) -> None:
-        self._raise()
+        fork_store = ForkTapeStore(self.store, self.name)
+        forked = replace(self, store=fork_store)
+        try:
+            yield forked
+        finally:
+            if merge_back:
+                await fork_store.merge_back()

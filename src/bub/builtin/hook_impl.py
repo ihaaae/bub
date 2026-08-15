@@ -21,8 +21,9 @@ from bub.framework import BubFramework
 from bub.hooks import hookimpl
 from bub.hooks.interception import ToolCall, ToolCallDecision
 from bub.model_selection import ModelChoice, ModelOptions
-from bub.streaming import AsyncStreamEvents
-from bub.tape import TapeContext, TapeStore
+from bub.store import TapeStore
+from bub.streaming import AsyncStreamEvents, StreamState
+from bub.tape import Tape, TapeContext
 from bub.turn import TurnState
 
 AGENTS_FILE_NAME = "AGENTS.md"
@@ -59,6 +60,7 @@ When responding to a channel message, you MUST:
 Excessively long context may cause model call failures. In this case, you MAY use tape.info to retrieve the token usage and you SHOULD use tape.handoff tool to shorten the retrieved history.
 </context_contract>
 """
+DEFAULT_CONTINUE_PROMPT = "Continue the task until all targets are completed."
 
 
 class BuiltinImpl:
@@ -217,6 +219,13 @@ class BuiltinImpl:
         )
 
     @hookimpl
+    def continue_prompt(self, prompt: str | list[dict], tape: Tape, state: StreamState) -> str:
+        del prompt, state
+        if "context" in tape.context.state:
+            return f"{DEFAULT_CONTINUE_PROMPT} [context: {tape.context.state['context']}]"
+        return DEFAULT_CONTINUE_PROMPT
+
+    @hookimpl
     def register_cli_commands(self, app: typer.Typer) -> None:
         from bub.builtin import cli
 
@@ -357,7 +366,7 @@ class BuiltinImpl:
     @hookimpl
     def provide_tape_store(self) -> TapeStore:
         import bub
-        from bub.builtin.store import FileTapeStore
+        from bub.store import FileTapeStore
 
         return FileTapeStore(directory=bub.home / "tapes")
 

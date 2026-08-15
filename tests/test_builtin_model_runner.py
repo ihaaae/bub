@@ -17,9 +17,8 @@ from any_llm.types.completion import (
 
 from bub.builtin.model_runner import ModelOutputAccumulator, ModelRunner, tool_invocation_from_native
 from bub.builtin.settings import AgentSettings, ModelCandidate
-from bub.builtin.tape import Tape
 from bub.streaming import StreamState
-from bub.tape import AsyncTapeStoreAdapter, InMemoryTapeStore, TapeContext
+from bub.tape import AsyncTapeStoreAdapter, InMemoryTapeStore, Tape, TapeContext
 from bub.tools import ToolExecutor
 
 
