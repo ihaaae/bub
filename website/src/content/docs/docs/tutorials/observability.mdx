@@ -67,6 +67,14 @@ The fields are useful when the model starts behaving oddly:
 - `last_token_usage` appears when token usage has been recorded by the model path.
 - `last_token_cache_hit_rate` shows the cached share of prompt tokens for that same model call when available.
 
+To see aggregate usage for every recorded model call in the current session, run:
+
+```bash
+uv run bub run ",tape.cost"
+```
+
+This reports cached input, uncached input, output tokens, and the provider-reported cost. If the provider does not report a cost, the command displays `unknown` rather than guessing a price.
+
 Because Bub uses the [tape model](/docs/concepts/tape-and-context/) from [tape.systems](https://tape.systems), the runtime can inspect its own operational record. Bub can answer questions about what happened because the tape is the same state it uses to rebuild context.
 
 ## 2. Search the tape for symptoms

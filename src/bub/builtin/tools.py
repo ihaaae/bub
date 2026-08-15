@@ -268,6 +268,20 @@ async def tape_info(context: ToolContext) -> str:
     )
 
 
+@tool(context=True, name="tape.cost")
+async def tape_cost(context: ToolContext) -> str:
+    """Show aggregate token usage and provider-reported cost for the current tape."""
+    cost = await context.tape.cost()
+    rendered_cost = f"${cost.cost:.6f}" if cost.cost is not None else "unknown"
+    return (
+        f"name: {cost.name}\n"
+        f"cached input: {cost.cached_input_tokens:,} tokens\n"
+        f"uncached input: {cost.uncached_input_tokens:,} tokens\n"
+        f"output: {cost.output_tokens:,} tokens\n"
+        f"cost: {rendered_cost}"
+    )
+
+
 @tool(context=True, name="tape.search", model=SearchInput)
 async def tape_search(param: SearchInput, *, context: ToolContext) -> str:
     """Search for entries in the current tape that match the query. Returns a list of matching entries."""
@@ -364,6 +378,7 @@ def show_help() -> str:
         "  ,help\n"
         "  ,skill name=foo\n"
         "  ,tape.info\n"
+        "  ,tape.cost\n"
         "  ,tape.search query=error\n"
         "  ,tape.handoff name=phase-1 summary='done'\n"
         "  ,tape.anchors\n"

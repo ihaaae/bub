@@ -36,6 +36,70 @@ class TapeInfo:
     last_token_cache_hit_rate: float | None
 
 
+def _usage_int(usage: Mapping[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return max(0, value)
+    return None
+
+
+def _detail_cached_input_tokens(usage: Mapping[str, Any]) -> int | None:
+    for details_key in ("prompt_tokens_details", "input_tokens_details"):
+        details = usage.get(details_key)
+        if isinstance(details, Mapping):
+            cached = _usage_int(details, "cached_tokens", "cache_read_input_tokens")
+            if cached is not None:
+                return cached
+    return _usage_int(usage, "cached_tokens")
+
+
+def _input_token_breakdown(usage: Mapping[str, Any]) -> tuple[int, int] | None:
+    """Return cached and uncached input tokens across common provider shapes."""
+    prompt_tokens = _usage_int(usage, "prompt_tokens")
+    input_tokens = _usage_int(usage, "input_tokens")
+    cache_read_tokens = _usage_int(usage, "cache_read_input_tokens")
+    cache_creation_tokens = _usage_int(usage, "cache_creation_input_tokens") or 0
+
+    if prompt_tokens is not None:
+        cached_tokens = _detail_cached_input_tokens(usage) or cache_read_tokens or 0
+        cached_tokens = min(cached_tokens, prompt_tokens)
+        return cached_tokens, prompt_tokens - cached_tokens
+
+    if input_tokens is None:
+        return None
+
+    # Anthropic reports input_tokens excluding cache reads and exposes those
+    # reads as a top-level cache_read_input_tokens field. Other providers use
+    # input_tokens as the total and put the cached subset in input details.
+    cached_detail = _detail_cached_input_tokens(usage)
+    if cached_detail is None and cache_read_tokens is not None:
+        return cache_read_tokens, input_tokens + cache_creation_tokens
+    cached_tokens = min(cached_detail or 0, input_tokens)
+    return cached_tokens, input_tokens - cached_tokens + cache_creation_tokens
+
+
+def _usage_cost(value: object) -> float | None:
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return None
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        return None
+    return cost if cost == cost and abs(cost) != float("inf") else None
+
+
+@dataclass(frozen=True)
+class TapeCost:
+    """Aggregate token usage and provider-reported cost for a tape."""
+
+    name: str
+    cached_input_tokens: int
+    uncached_input_tokens: int
+    output_tokens: int
+    cost: float | None
+
+
 @dataclass(frozen=True)
 class AnchorSummary:
     """Rendered anchor summary."""
@@ -109,6 +173,54 @@ class Tape:
             entries_since_last_anchor=entries_since_last_anchor,
             last_token_usage=last_token_usage,
             last_token_cache_hit_rate=last_token_cache_hit_rate,
+        )
+
+    async def cost(self) -> TapeCost:
+        """Aggregate token usage and provider-reported costs for this tape.
+
+        Providers do not expose a common pricing catalogue. When a provider
+        reports a ``cost`` field in its usage payload (OpenRouter does this,
+        for example), it is summed here. A missing cost remains unknown rather
+        than being presented as a misleading zero.
+        """
+        cached_input_tokens = 0
+        uncached_input_tokens = 0
+        output_tokens = 0
+        total_cost = 0.0
+        has_cost = False
+
+        entries = await self.store.fetch_all(self.query().kinds("event"))
+        for entry in entries:
+            if entry.payload.get("name") != "run":
+                continue
+            data = entry.payload.get("data")
+            if not isinstance(data, Mapping):
+                continue
+            usage = data.get("usage")
+            if not isinstance(usage, Mapping):
+                continue
+
+            input_breakdown = _input_token_breakdown(usage)
+            if input_breakdown is not None:
+                cached, uncached = input_breakdown
+                cached_input_tokens += cached
+                uncached_input_tokens += uncached
+
+            output = _usage_int(usage, "completion_tokens", "output_tokens")
+            if output is not None:
+                output_tokens += output
+
+            cost = _usage_cost(usage.get("cost"))
+            if cost is not None:
+                total_cost += cost
+                has_cost = True
+
+        return TapeCost(
+            name=self.name,
+            cached_input_tokens=cached_input_tokens,
+            uncached_input_tokens=uncached_input_tokens,
+            output_tokens=output_tokens,
+            cost=total_cost if has_cost else None,
         )
 
     async def ensure_bootstrap_anchor(self) -> None:

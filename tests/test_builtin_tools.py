@@ -20,6 +20,7 @@ from bub.builtin.tools import (
     resolve_tool_names,
     set_model,
     set_reasoning_effort,
+    tape_cost,
     tape_info,
 )
 from bub.errors import ErrorKind
@@ -55,6 +56,34 @@ async def test_tape_info_formats_token_cache_hit_rate(tmp_path) -> None:
     result = await tape_info.run(context=context)
 
     assert "last_token_cache_hit_rate: 37.50%" in result
+
+
+@pytest.mark.asyncio
+async def test_tape_cost_formats_aggregate_usage_and_cost(tmp_path) -> None:
+    context = _tool_context(tmp_path)
+    await context.tape.record_chat(
+        run_id="run-1",
+        system_prompt=None,
+        new_messages=[],
+        response_text=None,
+        usage={
+            "prompt_tokens": 1234,
+            "completion_tokens": 56,
+            "total_tokens": 1290,
+            "prompt_tokens_details": {"cached_tokens": 234},
+            "cost": 0.001234,
+        },
+    )
+
+    result = await tape_cost.run(context=context)
+
+    assert result == (
+        "name: test-tape\n"
+        "cached input: 234 tokens\n"
+        "uncached input: 1,000 tokens\n"
+        "output: 56 tokens\n"
+        "cost: $0.001234"
+    )
 
 
 def test_render_tools_prompt_renders_available_tools_block() -> None:

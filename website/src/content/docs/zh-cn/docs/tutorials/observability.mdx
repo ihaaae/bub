@@ -67,6 +67,14 @@ last_token_cache_hit_rate: 72.50%
 - `last_token_usage` 会在模型路径记录 token usage 后出现。
 - `last_token_cache_hit_rate` 表示同一次模型调用中命中缓存的 prompt token 比例（provider 提供明细时可用）。
 
+要查看当前 session 中所有已记录模型调用的累计用量，可以运行：
+
+```bash
+uv run bub run ",tape.cost"
+```
+
+该命令会显示 cached input、uncached input、output token，以及 provider 报告的 cost。如果 provider 没有报告 cost，命令会显示 `unknown`，而不会猜测价格。
+
 由于 Bub 使用来自 [tape.systems](https://tape.systems) 的 [tape 模型](/zh-cn/docs/concepts/tape-and-context/)，运行时可以检查自己的操作记录。Bub 能回答发生了什么，是因为 tape 正是它重建 context 时使用的状态。
 
 ## 2. 在 tape 中搜索症状

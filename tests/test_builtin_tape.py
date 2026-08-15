@@ -70,3 +70,61 @@ async def test_tape_info_omits_cache_hit_rate_when_usage_has_no_cache_details(tm
     info = await tape.info()
 
     assert info.last_token_cache_hit_rate is None
+
+
+@pytest.mark.asyncio
+async def test_tape_cost_aggregates_usage_and_provider_reported_cost(tmp_path: Path) -> None:
+    tape = Tape(tmp_path, AsyncTapeStoreAdapter(InMemoryTapeStore()), TapeContext()).scoped("test-tape")
+    await tape.record_chat(
+        run_id="run-1",
+        system_prompt=None,
+        new_messages=[],
+        response_text=None,
+        usage={
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": {"cached_tokens": 40},
+            "cost": 0.001,
+        },
+    )
+    await tape.record_chat(
+        run_id="run-2",
+        system_prompt=None,
+        new_messages=[],
+        response_text=None,
+        usage={
+            "input_tokens": 50,
+            "output_tokens": 5,
+            "total_tokens": 55,
+            "input_tokens_details": {"cached_tokens": 20},
+            "cost": 0.002,
+        },
+    )
+
+    cost = await tape.cost()
+
+    assert cost.name == "test-tape"
+    assert cost.cached_input_tokens == 60
+    assert cost.uncached_input_tokens == 90
+    assert cost.output_tokens == 15
+    assert cost.cost == pytest.approx(0.003)
+
+
+@pytest.mark.asyncio
+async def test_tape_cost_marks_cost_unknown_when_provider_does_not_report_it(tmp_path: Path) -> None:
+    tape = Tape(tmp_path, AsyncTapeStoreAdapter(InMemoryTapeStore()), TapeContext()).scoped("test-tape")
+    await tape.record_chat(
+        run_id="run-1",
+        system_prompt=None,
+        new_messages=[],
+        response_text=None,
+        usage={"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10},
+    )
+
+    cost = await tape.cost()
+
+    assert cost.cached_input_tokens == 0
+    assert cost.uncached_input_tokens == 8
+    assert cost.output_tokens == 2
+    assert cost.cost is None
