@@ -232,7 +232,6 @@ dependencies = [
     { name = "prompt-toolkit" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
-    { name = "python-telegram-bot" },
     { name = "pyyaml" },
     { name = "rapidfuzz" },
     { name = "rich" },
@@ -244,6 +243,9 @@ dependencies = [
 logfire = [
     { name = "logfire" },
 ]
+telegram = [
+    { name = "python-telegram-bot" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -251,6 +253,7 @@ dev = [
     { name = "prek" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-telegram-bot" },
     { name = "ruff" },
     { name = "tox-uv" },
     { name = "types-pyyaml" },
@@ -269,14 +272,14 @@ requires-dist = [
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
-    { name = "python-telegram-bot", specifier = ">=21.0" },
+    { name = "python-telegram-bot", marker = "extra == 'telegram'", specifier = ">=21.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "rapidfuzz", specifier = ">=3.14.3" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "typer", specifier = ">=0.9.0" },
     { name = "typing-extensions", specifier = ">=4.13.0" },
 ]
-provides-extras = ["logfire"]
+provides-extras = ["logfire", "telegram"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -284,6 +287,7 @@ dev = [
     { name = "prek", specifier = ">=0.3.1" },
     { name = "pytest", specifier = ">=7.2.0" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "python-telegram-bot", specifier = ">=21.0" },
     { name = "ruff", specifier = ">=0.11.5" },
     { name = "tox-uv", specifier = ">=1.11.3" },
     { name = "types-pyyaml", specifier = ">=6.0.12" },

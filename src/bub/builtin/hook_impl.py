@@ -318,12 +318,16 @@ class BuiltinImpl:
     @hookimpl
     def provide_channels(self, message_handler: MessageHandler) -> list[Channel]:
         from bub.channels.cli import CliChannel
-        from bub.channels.telegram import TelegramChannel
 
-        return [
-            TelegramChannel(on_receive=message_handler),
-            CliChannel(on_receive=message_handler, agent=self._get_agent()),
-        ]
+        channels: list[Channel] = []
+        try:
+            from bub.channels.telegram import TelegramChannel
+        except ImportError:
+            logger.debug("telegram channel skipped: install bub[telegram] to enable it")
+        else:
+            channels.append(TelegramChannel(on_receive=message_handler))
+        channels.append(CliChannel(on_receive=message_handler, agent=self._get_agent()))
+        return channels
 
     @hookimpl
     async def on_error(self, stage: str, error: Exception, message: Envelope | None) -> None:

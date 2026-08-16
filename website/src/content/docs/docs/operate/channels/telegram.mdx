@@ -13,7 +13,15 @@ The Telegram channel is registered under the name `telegram`. It uses long polli
 - For group chats, **Privacy Mode is disabled** in BotFather. Otherwise the bot only sees commands, and the inbound filter cannot decide whether to respond.
 - Bub is configured with a working model — see [Configure](/docs/operate/configure/).
 
-## 1. Set the token
+## 1. Install the extra
+
+The Telegram channel ships in the repository but is not a required dependency. Install it with:
+
+```bash
+pip install 'bub[telegram]'
+```
+
+## 2. Set the token
 
 ```bash
 BUB_TELEGRAM_TOKEN=123456:abcdef...
@@ -21,7 +29,7 @@ BUB_TELEGRAM_TOKEN=123456:abcdef...
 
 This single variable is the on/off switch. With it unset, the channel reports `enabled=False` and `bub gateway` skips it without error.
 
-## 2. Restrict who can talk to the bot
+## 3. Restrict who can talk to the bot
 
 Allowlists are comma-separated and case-sensitive on usernames:
 
@@ -40,7 +48,7 @@ Behavior:
 Leaving both allowlists empty means anyone who finds the bot can drive it. For any production deployment, set at least one.
 :::
 
-## 3. Optional: route through a proxy
+## 4. Optional: route through a proxy
 
 ```bash
 BUB_TELEGRAM_PROXY=http://127.0.0.1:7890
@@ -49,7 +57,7 @@ BUB_TELEGRAM_PROXY=http://127.0.0.1:7890
 
 The same proxy is used for both the polling connection and outbound API calls.
 
-## 4. Launch the gateway
+## 5. Launch the gateway
 
 ```bash
 uv run bub gateway --enable-channel telegram
@@ -62,7 +70,7 @@ telegram.start allow_users_count=2 allow_chats_count=1 proxy_enabled=False
 telegram.start polling
 ```
 
-## 5. How inbound messages are framed
+## 6. How inbound messages are framed
 
 The Telegram channel uses `telegram:<chat_id>` as the session id. That keeps a private chat and a group chat separate even if the same user is in both.
 
@@ -73,7 +81,7 @@ Inbound handling:
 - In private chats, every non-command message is ingested.
 - In group chats, every non-command message reaches the Telegram channel. Messages that mention `@<bot_username>`, contain the keyword `bub`, or reply to one of the bot's own messages are marked active. Other group messages are ignored unless an active conversation for the same session is open within `BUB_ACTIVE_TIME_WINDOW`, in which case they join that batch.
 
-## 6. Debounce
+## 7. Debounce
 
 The Telegram channel sets `needs_debounce=True`. Inbound messages are batched per session using `BUB_DEBOUNCE_SECONDS`, `BUB_MAX_WAIT_SECONDS`, and `BUB_ACTIVE_TIME_WINDOW`. See [Channels overview](/docs/operate/channels/) for the values.
 
@@ -81,7 +89,7 @@ The Telegram channel sets `needs_debounce=True`. Inbound messages are batched pe
 Comma commands (`,help`, `,fs.read ...`) always bypass debounce. They are dispatched the moment they arrive, regardless of any pending batch.
 :::
 
-## 7. Outbound behavior
+## 8. Outbound behavior
 
 Normal Telegram inbound messages set `output_channel="null"` before they enter the turn pipeline. That prevents a plain model return value from being sent back blindly. The bundled `telegram` skill is the canonical path for replies, progress updates, and edits.
 
