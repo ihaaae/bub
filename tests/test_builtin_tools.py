@@ -82,7 +82,37 @@ async def test_tape_cost_formats_aggregate_usage_and_cost(tmp_path) -> None:
         "cached input: 234 tokens\n"
         "uncached input: 1,000 tokens\n"
         "output: 56 tokens\n"
-        "cost: $0.001234"
+        "cost: $0.001234\n"
+        "estimated cost: unknown (no price table entry for model 'openrouter:openrouter/free')"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tape_cost_estimates_price_from_k3_price_table(tmp_path) -> None:
+    context = _tool_context(tmp_path, model="Moonshot:k3-256k")
+    await context.tape.record_chat(
+        run_id="run-1",
+        system_prompt=None,
+        new_messages=[],
+        response_text=None,
+        usage={
+            "prompt_tokens": 1_500_000,
+            "completion_tokens": 200_000,
+            "total_tokens": 1_700_000,
+            "prompt_tokens_details": {"cached_tokens": 500_000},
+        },
+    )
+
+    result = await tape_cost.run(context=context)
+
+    assert result == (
+        "name: test-tape\n"
+        "cached input: 500,000 tokens\n"
+        "uncached input: 1,000,000 tokens\n"
+        "output: 200,000 tokens\n"
+        "cost: unknown\n"
+        "price table (k3-256k, ¥ per 1M tokens): cached input ¥2.00, uncached input ¥20.00, output ¥100.00\n"
+        "estimated cost: ¥41.000000"
     )
 
 

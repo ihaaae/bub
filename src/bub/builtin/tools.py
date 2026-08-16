@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel, Field
 
+from bub.builtin.settings import load_settings
 from bub.builtin.shell_manager import shell_manager
 from bub.skills import discover_skills
+from bub.tape import TapeCost
 from bub.tools import REGISTRY, Tool, ToolContext, tool
 
 if TYPE_CHECKING:
@@ -268,18 +270,71 @@ async def tape_info(context: ToolContext) -> str:
     )
 
 
+PER_MILLION = 1_000_000
+
+
+class ModelPricing(BaseModel):
+    """Per-model pricing in ¥ per 1M tokens."""
+
+    cached_input: float
+    uncached_input: float
+    output: float
+    currency: str = "¥"
+
+
+# Prices are ¥ per 1M tokens.
+PRICE_TABLE: dict[str, ModelPricing] = {
+    "k3": ModelPricing(cached_input=2.0, uncached_input=20.0, output=100.0),
+}
+
+
+def _pricing_for_model(model: str | None) -> tuple[str, ModelPricing] | None:
+    if not model:
+        return None
+    model_id = model.split(":", 1)[-1].strip().lower()
+    for key, pricing in PRICE_TABLE.items():
+        if model_id == key or model_id.startswith(key):
+            return model_id, pricing
+    return None
+
+
+def _estimate_cost(cost: TapeCost, pricing: ModelPricing) -> float:
+    return (
+        (cost.cached_input_tokens * pricing.cached_input)
+        + (cost.uncached_input_tokens * pricing.uncached_input)
+        + (cost.output_tokens * pricing.output)
+    ) / PER_MILLION
+
+
 @tool(context=True, name="tape.cost")
 async def tape_cost(context: ToolContext) -> str:
     """Show aggregate token usage and provider-reported cost for the current tape."""
     cost = await context.tape.cost()
     rendered_cost = f"${cost.cost:.6f}" if cost.cost is not None else "unknown"
-    return (
-        f"name: {cost.name}\n"
-        f"cached input: {cost.cached_input_tokens:,} tokens\n"
-        f"uncached input: {cost.uncached_input_tokens:,} tokens\n"
-        f"output: {cost.output_tokens:,} tokens\n"
-        f"cost: {rendered_cost}"
-    )
+    lines = [
+        f"name: {cost.name}",
+        f"cached input: {cost.cached_input_tokens:,} tokens",
+        f"uncached input: {cost.uncached_input_tokens:,} tokens",
+        f"output: {cost.output_tokens:,} tokens",
+        f"cost: {rendered_cost}",
+    ]
+
+    model = context.state.get("model") or load_settings().model
+    priced = _pricing_for_model(str(model) if model else None)
+    if priced is None:
+        lines.append(f"estimated cost: unknown (no price table entry for model {model!r})")
+    else:
+        model_id, pricing = priced
+        lines.extend(
+            [
+                f"price table ({model_id}, {pricing.currency} per 1M tokens): "
+                f"cached input {pricing.currency}{pricing.cached_input:.2f}, "
+                f"uncached input {pricing.currency}{pricing.uncached_input:.2f}, "
+                f"output {pricing.currency}{pricing.output:.2f}",
+                f"estimated cost: {pricing.currency}{_estimate_cost(cost, pricing):.6f}",
+            ]
+        )
+    return "\n".join(lines)
 
 
 @tool(context=True, name="tape.search", model=SearchInput)
