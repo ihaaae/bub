@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+UV_VERSION="0.6.14"
+NODE_VERSION="22.16.0"
+PNPM_VERSION="10.34.5"
+
+export PATH="$HOME/.local/bin:$PATH"
+
+step() {
+    local label="$1"
+    shift
+    echo "==> $label"
+    time "$@"
+}
+
+ensure_login_path() {
+    local marker="# bub orb toolchain"
+    touch "$HOME/.bash_profile"
+    if grep -Fqx "$marker" "$HOME/.bash_profile"; then
+        echo "Login-shell PATH is already configured"
+        return
+    fi
+
+    cat >> "$HOME/.bash_profile" <<'EOF'
+
+# bub orb toolchain
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+EOF
+}
+
+install_uv() {
+    if command -v uv >/dev/null 2>&1 && [[ "$(uv --version)" == "uv $UV_VERSION" ]]; then
+        echo "uv $UV_VERSION is already installed"
+        return
+    fi
+
+    local architecture archive temporary_directory
+    case "$(uname -m)" in
+        x86_64) architecture="x86_64" ;;
+        aarch64 | arm64) architecture="aarch64" ;;
+        *) echo "Unsupported architecture: $(uname -m)" >&2; return 1 ;;
+    esac
+
+    archive="uv-${architecture}-unknown-linux-gnu.tar.gz"
+    temporary_directory="$(mktemp -d)"
+    curl --fail --location --silent --show-error \
+        "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${archive}" \
+        --output "$temporary_directory/$archive"
+    tar -xzf "$temporary_directory/$archive" -C "$temporary_directory"
+    install -Dm755 "$temporary_directory/uv-${architecture}-unknown-linux-gnu/uv" "$HOME/.local/bin/uv"
+    install -Dm755 "$temporary_directory/uv-${architecture}-unknown-linux-gnu/uvx" "$HOME/.local/bin/uvx"
+    rm -rf "$temporary_directory"
+}
+
+install_node() {
+    local architecture archive install_directory temporary_directory
+    case "$(uname -m)" in
+        x86_64) architecture="x64" ;;
+        aarch64 | arm64) architecture="arm64" ;;
+        *) echo "Unsupported architecture: $(uname -m)" >&2; return 1 ;;
+    esac
+
+    install_directory="$HOME/.local/share/node-v$NODE_VERSION-linux-$architecture"
+    if [[ ! -x "$install_directory/bin/node" ]]; then
+        archive="node-v$NODE_VERSION-linux-$architecture.tar.xz"
+        temporary_directory="$(mktemp -d)"
+        curl --fail --location --silent --show-error \
+            "https://nodejs.org/dist/v${NODE_VERSION}/${archive}" \
+            --output "$temporary_directory/$archive"
+        mkdir -p "$HOME/.local/share"
+        tar -xJf "$temporary_directory/$archive" -C "$HOME/.local/share"
+        rm -rf "$temporary_directory"
+    else
+        echo "Node.js $NODE_VERSION is already installed"
+    fi
+
+    mkdir -p "$HOME/.local/bin"
+    for executable in node npm npx corepack; do
+        ln -sfn "$install_directory/bin/$executable" "$HOME/.local/bin/$executable"
+    done
+    corepack enable --install-directory "$HOME/.local/bin"
+    corepack install --global "pnpm@$PNPM_VERSION"
+}
+
+install_prek_hooks() {
+    if git config --get core.hooksPath >/dev/null; then
+        echo "Git core.hooksPath is managed externally; skipping prek hook installation"
+        return
+    fi
+    uv run prek install
+}
+
+step "Configuring login-shell PATH" ensure_login_path
+step "Installing uv" install_uv
+step "Installing Node.js and pnpm" install_node
+
+echo "==> Tool versions"
+uv --version
+node --version
+pnpm --version
+
+step "Syncing Python dependencies" uv sync --dev --frozen
+step "Installing website dependencies" pnpm --dir website install --frozen-lockfile
+step "Installing prek hooks" install_prek_hooks
+
+echo "==> Orb setup complete"
