@@ -4,6 +4,7 @@ set -euo pipefail
 UV_VERSION="0.6.14"
 NODE_VERSION="22.16.0"
 PNPM_VERSION="10.34.5"
+UPSTREAM_URL="https://github.com/bubbuild/bub.git"
 
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -30,6 +31,14 @@ case ":$PATH:" in
     *) export PATH="$HOME/.local/bin:$PATH" ;;
 esac
 EOF
+}
+
+ensure_upstream_remote() {
+    if git remote get-url upstream >/dev/null 2>&1; then
+        git remote set-url upstream "$UPSTREAM_URL"
+    else
+        git remote add upstream "$UPSTREAM_URL"
+    fi
 }
 
 install_uv() {
@@ -94,6 +103,7 @@ install_prek_hooks() {
     uv run prek install
 }
 
+step "Configuring upstream Git remote" ensure_upstream_remote
 step "Configuring login-shell PATH" ensure_login_path
 step "Installing uv" install_uv
 step "Installing Node.js and pnpm" install_node
